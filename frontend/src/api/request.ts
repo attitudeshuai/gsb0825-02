@@ -33,7 +33,7 @@ service.interceptors.response.use(
       router.push('/login')
       ElMessage.error('登录已过期，请重新登录')
     } else if (error.response?.status === 403) {
-      ElMessage.error('权限不足')
+      ElMessage.error(error.response.data?.message || '权限不足')
     } else if (error.response?.data?.message) {
       ElMessage.error(error.response.data.message)
     } else {

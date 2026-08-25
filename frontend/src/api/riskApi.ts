@@ -94,9 +94,17 @@ export const getIntercepts = (params?: any) => {
   })
 }
 
-export const checkRisk = (data: { userId?: number; deviceId?: string; ipAddress?: string; batchId?: number }) => {
+export const checkRisk = (data: { userId?: number; deviceId?: string; ipAddress?: string; batchId?: number; scene?: string }) => {
   return request<{ blocked: boolean; reason?: string }>({
     url: '/risk/check',
+    method: 'post',
+    data
+  })
+}
+
+export const blacklistFromIntercept = (id: number, data: { type: 'ip' | 'device' | 'user'; reason?: string }) => {
+  return request<{ message: string; duplicated?: boolean }>({
+    url: `/risk/intercepts/${id}/blacklist`,
     method: 'post',
     data
   })

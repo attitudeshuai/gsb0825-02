@@ -1,8 +1,9 @@
 const { authMiddleware, roleMiddleware } = require('../middleware/auth');
-const { CouponBatch, CouponCode, User, sequelize } = require('../models');
+const { CouponBatch, CouponCode, ReceiveRecord, User, sequelize } = require('../models');
 const { Op, QueryTypes } = require('sequelize');
 const dayjs = require('dayjs');
 const crypto = require('crypto');
+const { issueCoupons, getSegmentOverview, getUserIdsBySegment } = require('../services/couponService');
 
 function generateBatchCode() {
   return 'BATCH' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -126,7 +127,7 @@ async function routes(fastify, options) {
   fastify.post('/api/batches/:id/cancel', { preHandler: [authMiddleware, roleMiddleware(['admin'])] }, async (request, reply) => {
     const t = await sequelize.transaction();
     try {
-      const batch = await CouponBatch.findByPk(request.params.id, { transaction: t });
+      const batch = await CouponBatch.findByPk(request.params.id, { lock: true, transaction: t });
       if (!batch) {
         await t.rollback();
         return reply.status(404).send({ message: '批次不存在' });
@@ -140,11 +141,74 @@ async function routes(fastify, options) {
         { where: { batchId: batch.id, status: { [Op.in]: ['available', 'received'] } }, transaction: t }
       );
 
+      await ReceiveRecord.update(
+        { isCancelled: true, cancelledAt: new Date(), cancelledBy: request.user.id },
+        { where: { batchId: batch.id, isCancelled: false }, transaction: t }
+      );
+
       await t.commit();
       return { message: '批次已取消' };
     } catch (error) {
       await t.rollback();
       return reply.status(400).send({ message: error.message });
+    }
+  });
+
+  fastify.get('/api/batches/segments', { preHandler: [authMiddleware, roleMiddleware(['admin', 'operator'])] }, async (request, reply) => {
+    const overview = await getSegmentOverview();
+    return overview;
+  });
+
+  fastify.post('/api/batches/:id/issue', { preHandler: [authMiddleware, roleMiddleware(['admin', 'operator'])] }, async (request, reply) => {
+    try {
+      const { userIds, usersText, eachCount } = request.body;
+
+      let ids = Array.isArray(userIds) ? userIds : [];
+      if (typeof usersText === 'string' && usersText.trim()) {
+        ids = ids.concat(usersText.split(/[\s,，、;；\n\r]+/).filter(Boolean));
+      }
+
+      const result = await issueCoupons({
+        batchId: request.params.id,
+        userIds: ids,
+        channel: 'manual',
+        eachCount
+      });
+
+      const genTip = result.generated > 0 ? `，自动补生成券码 ${result.generated} 张` : '';
+      return { message: `发放完成：成功 ${result.issued} 张${genTip}，跳过 ${result.skipped.length} 个用户`, ...result };
+    } catch (error) {
+      return reply.status(error.statusCode || 400).send({ message: error.message });
+    }
+  });
+
+  fastify.post('/api/batches/:id/issue-targeted', { preHandler: [authMiddleware, roleMiddleware(['admin', 'operator'])] }, async (request, reply) => {
+    try {
+      const { segment, maxUsers, eachCount } = request.body;
+      if (!segment) {
+        return reply.status(400).send({ message: '请选择目标人群分层' });
+      }
+
+      const userIds = await getUserIdsBySegment(segment, maxUsers);
+      if (userIds.length === 0) {
+        return reply.status(400).send({ message: '该人群分层下暂无用户' });
+      }
+
+      const result = await issueCoupons({
+        batchId: request.params.id,
+        userIds,
+        channel: 'targeted',
+        eachCount
+      });
+
+      const genTip = result.generated > 0 ? `，自动补生成券码 ${result.generated} 张` : '';
+      return {
+        message: `定向发放完成：人群 ${userIds.length} 人，成功发放 ${result.issued} 张${genTip}，跳过 ${result.skipped.length} 人`,
+        segmentUsers: userIds.length,
+        ...result
+      };
+    } catch (error) {
+      return reply.status(error.statusCode || 400).send({ message: error.message });
     }
   });
 

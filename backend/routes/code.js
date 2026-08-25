@@ -2,6 +2,16 @@ const { authMiddleware, roleMiddleware } = require('../middleware/auth');
 const { CouponCode, CouponBatch, ReceiveRecord, sequelize } = require('../models');
 const { Op, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
+const { checkRisk } = require('../services/riskService');
+const { claimSpecificCoupon } = require('../services/couponService');
+
+function buildContext(request, body) {
+  return {
+    ipAddress: request.ip,
+    deviceId: body.deviceId || null,
+    userAgent: request.headers['user-agent'] || null
+  };
+}
 
 async function routes(fastify, options) {
   fastify.get('/api/codes', { preHandler: [authMiddleware] }, async (request, reply) => {
@@ -30,128 +40,80 @@ async function routes(fastify, options) {
   });
 
   fastify.post('/api/codes/:id/receive', { preHandler: [authMiddleware] }, async (request, reply) => {
-    const t = await sequelize.transaction();
     try {
       const { userId, deviceId } = request.body;
-      const coupon = await CouponCode.findByPk(request.params.id, {
-        lock: true,
-        transaction: t
-      });
+      if (!userId) {
+        return reply.status(400).send({ message: '缺少用户ID' });
+      }
 
-      if (!coupon) {
-        await t.rollback();
+      const preCoupon = await CouponCode.findByPk(request.params.id);
+      if (!preCoupon) {
         return reply.status(404).send({ message: '券码不存在' });
       }
 
-      if (coupon.status !== 'available') {
-        await t.rollback();
-        return reply.status(400).send({ message: '券码不可用' });
-      }
-
-      const batch = await CouponBatch.findByPk(coupon.batchId, { transaction: t });
-      if (batch.status !== 'active') {
-        await t.rollback();
-        return reply.status(400).send({ message: '批次未激活' });
-      }
-
-      const userReceivedCount = await CouponCode.count({
-        where: { batchId: batch.id, userId, status: { [Op.ne]: 'cancelled' } },
-        transaction: t
-      });
-
-      if (userReceivedCount >= batch.limitPerPerson) {
-        await t.rollback();
-        return reply.status(400).send({ message: '已达到领取上限' });
-      }
-
-      coupon.userId = userId;
-      coupon.status = 'received';
-      coupon.receivedAt = new Date();
-      coupon.ipAddress = request.ip;
-      coupon.deviceInfo = { deviceId };
-
-      if (batch.validityType === 'relative') {
-        coupon.validStartTime = new Date();
-        coupon.validEndTime = new Date(Date.now() + batch.validDays * 24 * 60 * 60 * 1000);
-      } else {
-        coupon.validStartTime = batch.startTime;
-        coupon.validEndTime = batch.endTime;
-      }
-
-      await coupon.save({ transaction: t });
-
-      await batch.increment('receivedQuantity', { by: 1, transaction: t });
-
-      await ReceiveRecord.create({
-        batchId: batch.id,
-        couponId: coupon.id,
+      const context = buildContext(request, request.body);
+      const risk = await checkRisk({
         userId,
-        channel: batch.deliveryStrategy,
         deviceId,
         ipAddress: request.ip,
-        userAgent: request.headers['user-agent']
-      }, { transaction: t });
+        batchId: preCoupon.batchId,
+        scene: 'receive'
+      });
 
-      await t.commit();
-      return coupon;
+      if (risk.blocked) {
+        return reply.status(403).send({ message: risk.reason, blocked: true, riskLevel: risk.riskLevel });
+      }
+
+      const coupon = await claimSpecificCoupon({
+        couponId: request.params.id,
+        userId,
+        channel: 'receive',
+        context,
+        risk
+      });
+
+      return { ...coupon.toJSON(), riskLevel: risk.riskLevel, riskReason: risk.riskReason || null };
     } catch (error) {
-      await t.rollback();
-      return reply.status(400).send({ message: error.message });
+      return reply.status(error.statusCode || 400).send({ message: error.message });
     }
   });
 
   fastify.post('/api/codes/redeem', { preHandler: [authMiddleware] }, async (request, reply) => {
-    const { code, userId, deviceId } = request.body;
-
-    const t = await sequelize.transaction();
     try {
-      const coupon = await CouponCode.findOne({
-        where: { code },
-        lock: true,
-        transaction: t
-      });
+      const { code, userId, deviceId } = request.body;
+      if (!code || !userId) {
+        return reply.status(400).send({ message: '缺少兑换码或用户ID' });
+      }
 
-      if (!coupon) {
-        await t.rollback();
+      const preCoupon = await CouponCode.findOne({ where: { code } });
+      if (!preCoupon) {
         return reply.status(404).send({ message: '兑换码不存在' });
       }
 
-      if (coupon.status !== 'available') {
-        await t.rollback();
-        return reply.status(400).send({ message: '兑换码已被使用或已过期' });
+      const context = buildContext(request, request.body);
+      const risk = await checkRisk({
+        userId,
+        deviceId,
+        ipAddress: request.ip,
+        batchId: preCoupon.batchId,
+        scene: 'redeem'
+      });
+
+      if (risk.blocked) {
+        return reply.status(403).send({ message: risk.reason, blocked: true, riskLevel: risk.riskLevel });
       }
 
-      const batch = await CouponBatch.findByPk(coupon.batchId, { transaction: t });
-      if (batch.status !== 'active') {
-        await t.rollback();
-        return reply.status(400).send({ message: '活动已结束' });
-      }
-
-      coupon.userId = userId;
-      coupon.status = 'received';
-      coupon.receivedAt = new Date();
-      coupon.ipAddress = request.ip;
-      coupon.deviceInfo = { deviceId };
-      coupon.validStartTime = new Date();
-      coupon.validEndTime = batch.endTime || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-
-      await coupon.save({ transaction: t });
-      await batch.increment('receivedQuantity', { by: 1, transaction: t });
-
-      await ReceiveRecord.create({
-        batchId: batch.id,
-        couponId: coupon.id,
+      const coupon = await claimSpecificCoupon({
+        code,
         userId,
         channel: 'redeem',
-        deviceId,
-        ipAddress: request.ip
-      }, { transaction: t });
+        context,
+        risk
+      });
 
-      await t.commit();
-      return coupon;
+      return { ...coupon.toJSON(), riskLevel: risk.riskLevel, riskReason: risk.riskReason || null };
     } catch (error) {
-      await t.rollback();
-      return reply.status(400).send({ message: error.message });
+      return reply.status(error.statusCode || 400).send({ message: error.message });
     }
   });
 
@@ -166,17 +128,15 @@ async function routes(fastify, options) {
   });
 
   fastify.post('/api/codes/:id/cancel', { preHandler: [authMiddleware, roleMiddleware(['admin', 'operator'])] }, async (request, reply) => {
+    const preCoupon = await CouponCode.findByPk(request.params.id);
+    if (!preCoupon) {
+      return reply.status(404).send({ message: '券码不存在' });
+    }
+
     const t = await sequelize.transaction();
     try {
-      const coupon = await CouponCode.findByPk(request.params.id, {
-        include: [CouponBatch],
-        transaction: t
-      });
-
-      if (!coupon) {
-        await t.rollback();
-        return reply.status(404).send({ message: '券码不存在' });
-      }
+      const batch = await CouponBatch.findByPk(preCoupon.batchId, { lock: true, transaction: t });
+      const coupon = await CouponCode.findByPk(preCoupon.id, { lock: true, transaction: t });
 
       if (coupon.status === 'used') {
         await t.rollback();
@@ -187,13 +147,13 @@ async function routes(fastify, options) {
       coupon.status = 'cancelled';
       await coupon.save({ transaction: t });
 
-      if (oldStatus === 'received') {
-        await coupon.CouponBatch.decrement('receivedQuantity', { by: 1, transaction: t });
+      if (oldStatus === 'received' && batch) {
+        await batch.decrement('receivedQuantity', { by: 1, transaction: t });
       }
 
       await ReceiveRecord.update(
         { isCancelled: true, cancelledAt: new Date(), cancelledBy: request.user.id },
-        { where: { couponId: coupon.id }, transaction: t }
+        { where: { couponId: coupon.id, isCancelled: false }, transaction: t }
       );
 
       await t.commit();

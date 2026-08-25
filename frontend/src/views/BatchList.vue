@@ -75,11 +75,12 @@
             {{ formatDate(row.createdAt) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="280" fixed="right">
+        <el-table-column label="操作" width="330" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="viewDetail(row)">详情</el-button>
             <el-button v-if="row.status === 'pending'" link type="primary" @click="editBatch(row)">编辑</el-button>
             <el-button v-if="row.status === 'pending'" link type="success" @click="handleActivate(row)">激活</el-button>
+            <el-button v-if="row.status === 'active'" link type="primary" @click="goIssue(row)">发放</el-button>
             <el-button v-if="row.status === 'active'" link type="warning" @click="handleStop(row)">停止</el-button>
             <el-button v-if="row.status !== 'cancelled'" link type="danger" @click="handleCancel(row)">取消</el-button>
           </template>
@@ -192,6 +193,10 @@ const viewDetail = (row: any) => {
 
 const editBatch = (row: any) => {
   router.push(`/batches/${row.id}/edit`)
+}
+
+const goIssue = (row: any) => {
+  router.push({ path: '/issue', query: { batchId: row.id } })
 }
 
 const handleActivate = async (row: any) => {
