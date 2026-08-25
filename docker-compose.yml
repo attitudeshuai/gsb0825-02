@@ -1,0 +1,64 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: coupon-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: coupon_management
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - coupon-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: coupon-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      JWT_SECRET: coupon-management-secret-key-2024
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: coupon_management
+      DB_USER: postgres
+      DB_PASSWORD: postgres123
+      TOKEN_EXPIRES_IN: 24h
+    ports:
+      - "3010:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - coupon-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: coupon-frontend
+    restart: unless-stopped
+    ports:
+      - "8090:80"
+    depends_on:
+      - backend
+    networks:
+      - coupon-network
+
+volumes:
+  postgres-data:
+
+networks:
+  coupon-network:
+    driver: bridge
