@@ -170,3 +170,36 @@ export const getUserCoupons = (data: { userId: number; status?: string; batchId?
     data
   })
 }
+
+export interface IssueResult {
+  message: string
+  issued: number
+  generated?: number
+  totalUsers: number
+  channel: string
+  skipped: { userId: number; reason: string }[]
+  segmentUsers?: number
+}
+
+export const issueCoupons = (batchId: number, data: { usersText?: string; userIds?: number[]; eachCount?: number }) => {
+  return request<IssueResult>({
+    url: `/batches/${batchId}/issue`,
+    method: 'post',
+    data
+  })
+}
+
+export const issueTargetedCoupons = (batchId: number, data: { segment: string; maxUsers?: number; eachCount?: number }) => {
+  return request<IssueResult>({
+    url: `/batches/${batchId}/issue-targeted`,
+    method: 'post',
+    data
+  })
+}
+
+export const getSegmentOverview = () => {
+  return request<Record<string, { name: string; count: number }>>({
+    url: '/batches/segments',
+    method: 'get'
+  })
+}

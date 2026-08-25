@@ -95,20 +95,22 @@ async function routes(fastify, options) {
   });
 
   fastify.post('/api/codes/:id/use', { preHandler: [authMiddleware] }, async (request, reply) => {
+    const preCoupon = await CouponCode.findByPk(request.params.id);
+    if (!preCoupon) {
+      return reply.status(404).send({ message: '优惠券不存在' });
+    }
+
     const t = await sequelize.transaction();
     try {
       const { orderId, orderAmount, userId, productInfo } = request.body;
       const now = new Date();
 
-      const coupon = await CouponCode.findByPk(request.params.id, {
+      const batch = await CouponBatch.findByPk(preCoupon.batchId, { lock: true, transaction: t });
+
+      const coupon = await CouponCode.findByPk(preCoupon.id, {
         lock: true,
         transaction: t
       });
-
-      if (!coupon) {
-        await t.rollback();
-        return reply.status(404).send({ message: '优惠券不存在' });
-      }
 
       if (coupon.status !== 'received') {
         await t.rollback();
@@ -130,7 +132,6 @@ async function routes(fastify, options) {
         return reply.status(400).send({ message: '优惠券未到使用时间' });
       }
 
-      const batch = await CouponBatch.findByPk(coupon.batchId, { transaction: t });
       const discountAmount = calculateDiscount(batch, orderAmount);
 
       if (discountAmount <= 0) {
@@ -169,34 +170,33 @@ async function routes(fastify, options) {
   });
 
   fastify.post('/api/records/use/:id/refund', { preHandler: [authMiddleware, roleMiddleware(['admin', 'finance'])] }, async (request, reply) => {
+    const preRecord = await UseRecord.findByPk(request.params.id);
+    if (!preRecord) {
+      return reply.status(404).send({ message: '核销记录不存在' });
+    }
+
     const t = await sequelize.transaction();
     try {
       const { refundOrderId } = request.body;
-      const useRecord = await UseRecord.findByPk(request.params.id, {
-        include: [CouponCode, CouponBatch],
-        transaction: t
-      });
 
-      if (!useRecord) {
-        await t.rollback();
-        return reply.status(404).send({ message: '核销记录不存在' });
-      }
+      const batch = await CouponBatch.findByPk(preRecord.batchId, { lock: true, transaction: t });
+      const coupon = await CouponCode.findByPk(preRecord.couponId, { lock: true, transaction: t });
+      const useRecord = await UseRecord.findByPk(preRecord.id, { lock: true, transaction: t });
 
       if (useRecord.isRefunded) {
         await t.rollback();
         return reply.status(400).send({ message: '该订单已退款' });
       }
 
-      const coupon = useRecord.CouponCode;
-      if (coupon) {
+      if (coupon && coupon.status === 'used') {
         coupon.status = 'received';
         coupon.usedAt = null;
         coupon.orderId = null;
         await coupon.save({ transaction: t });
-      }
 
-      if (useRecord.CouponBatch) {
-        await useRecord.CouponBatch.decrement('usedQuantity', { by: 1, transaction: t });
+        if (batch) {
+          await batch.decrement('usedQuantity', { by: 1, transaction: t });
+        }
       }
 
       useRecord.isRefunded = true;
@@ -214,35 +214,65 @@ async function routes(fastify, options) {
 
   fastify.post('/api/records/receive/batch-cancel', { preHandler: [authMiddleware, roleMiddleware(['admin', 'operator'])] }, async (request, reply) => {
     const { ids } = request.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return reply.status(400).send({ message: '请选择要作废的记录' });
+    }
+
+    const preRecords = await ReceiveRecord.findAll({ where: { id: { [Op.in]: ids } } });
+    if (preRecords.length === 0) {
+      return reply.status(404).send({ message: '未找到匹配的领取记录' });
+    }
+
     const t = await sequelize.transaction();
 
     try {
+      const batchIds = [...new Set(preRecords.map(r => r.batchId))].sort((a, b) => a - b);
+      const couponIds = [...new Set(preRecords.map(r => r.couponId))];
+
+      const batches = await CouponBatch.findAll({
+        where: { id: { [Op.in]: batchIds } },
+        lock: true,
+        transaction: t
+      });
+      const batchMap = new Map(batches.map(b => [b.id, b]));
+
+      const coupons = await CouponCode.findAll({
+        where: { id: { [Op.in]: couponIds } },
+        lock: true,
+        transaction: t
+      });
+      const couponMap = new Map(coupons.map(c => [c.id, c]));
+
       const records = await ReceiveRecord.findAll({
         where: { id: { [Op.in]: ids } },
-        include: [CouponCode, CouponBatch],
+        lock: true,
         transaction: t
       });
 
+      let cancelledCount = 0;
       for (const record of records) {
-        if (!record.isCancelled && record.CouponCode) {
-          record.isCancelled = true;
-          record.cancelledAt = new Date();
-          record.cancelledBy = request.user.id;
-          await record.save({ transaction: t });
+        if (record.isCancelled) continue;
 
-          if (record.CouponCode.status === 'received') {
-            record.CouponCode.status = 'cancelled';
-            await record.CouponCode.save({ transaction: t });
+        record.isCancelled = true;
+        record.cancelledAt = new Date();
+        record.cancelledBy = request.user.id;
+        await record.save({ transaction: t });
+        cancelledCount++;
 
-            if (record.CouponBatch) {
-              await record.CouponBatch.decrement('receivedQuantity', { by: 1, transaction: t });
-            }
+        const coupon = couponMap.get(record.couponId);
+        if (coupon && coupon.status === 'received') {
+          coupon.status = 'cancelled';
+          await coupon.save({ transaction: t });
+
+          const batch = batchMap.get(record.batchId);
+          if (batch) {
+            await batch.decrement('receivedQuantity', { by: 1, transaction: t });
           }
         }
       }
 
       await t.commit();
-      return { message: `成功作废 ${records.length} 条记录` };
+      return { message: `成功作废 ${cancelledCount} 条记录` };
     } catch (error) {
       await t.rollback();
       return reply.status(400).send({ message: error.message });

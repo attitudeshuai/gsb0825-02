@@ -3,14 +3,14 @@
     <div class="page-header">
       <h2 class="page-title">风控配置</h2>
       <div>
-        <el-button type="primary" :icon="Plus" @click="ruleDialogVisible = true">
+        <el-button type="primary" :icon="Plus" @click="handleAddRule">
           添加规则
         </el-button>
         <el-button @click="handleInitRules">初始化默认规则</el-button>
       </div>
     </div>
     
-    <el-tabs v-model="activeTab">
+    <el-tabs v-model="activeTab" @tab-change="handleTabChange">
       <el-tab-pane label="风控规则" name="rules">
         <div v-loading="loading" class="table-container">
           <el-table :data="rules" border stripe>
@@ -22,6 +22,9 @@
               <template #default="{ row }">
                 <template v-if="row.ruleType === 'frequency' || row.ruleType === 'ip' || row.ruleType === 'device'">
                   {{ windowText(row.ruleType) }}: {{ row.config.limit }}次/{{ row.config.windowMinutes }}分钟
+                </template>
+                <template v-else-if="row.ruleType === 'behavior'">
+                  同IP/设备: {{ row.config.distinctUserLimit }}个账号/{{ row.config.windowMinutes }}分钟
                 </template>
                 <template v-else>{{ JSON.stringify(row.config) }}</template>
               </template>
@@ -116,23 +119,56 @@
         <div v-loading="loading" class="table-container">
           <el-table :data="intercepts" border stripe>
             <el-table-column prop="id" label="ID" width="80" />
+            <el-table-column label="场景" width="110">
+              <template #default="{ row }">{{ sceneText(row.details?.scene) }}</template>
+            </el-table-column>
             <el-table-column prop="ruleName" label="触发规则" min-width="150" />
-            <el-table-column prop="action" label="处理动作" width="100" />
+            <el-table-column label="处理动作" width="100">
+              <template #default="{ row }">{{ actionText(row.action) }}</template>
+            </el-table-column>
             <el-table-column prop="userId" label="用户ID" width="100" />
             <el-table-column prop="ipAddress" label="IP地址" width="130" />
             <el-table-column prop="deviceId" label="设备ID" width="150" />
             <el-table-column prop="createdAt" label="时间" width="180">
               <template #default="{ row }">{{ formatDate(row.createdAt) }}</template>
             </el-table-column>
-            <el-table-column label="详情" min-width="200">
+            <el-table-column label="详情" min-width="180">
               <template #default="{ row }">
                 <el-tooltip :content="JSON.stringify(row.details)" placement="top">
-                  <span>{{ JSON.stringify(row.details) }}</span>
+                  <span class="details-text">{{ JSON.stringify(row.details) }}</span>
                 </el-tooltip>
               </template>
             </el-table-column>
+            <el-table-column label="一键拉黑" width="230" fixed="right">
+              <template #default="{ row }">
+                <el-button
+                  link
+                  type="danger"
+                  :disabled="!row.ipAddress"
+                  @click="handleBlacklist(row, 'ip')"
+                >
+                  拉黑IP
+                </el-button>
+                <el-button
+                  link
+                  type="danger"
+                  :disabled="!row.deviceId"
+                  @click="handleBlacklist(row, 'device')"
+                >
+                  拉黑设备
+                </el-button>
+                <el-button
+                  link
+                  type="danger"
+                  :disabled="row.userId == null"
+                  @click="handleBlacklist(row, 'user')"
+                >
+                  拉黑用户
+                </el-button>
+              </template>
+            </el-table-column>
           </el-table>
-          
+
           <div class="pagination-container">
             <el-pagination
               v-model:current-page="interceptPagination.page"
@@ -141,6 +177,7 @@
               :page-sizes="[10, 20, 50, 100]"
               layout="total, sizes, prev, pager, next, jumper"
               @current-change="loadIntercepts"
+              @size-change="handleInterceptSizeChange"
             />
           </div>
         </div>
@@ -150,7 +187,7 @@
     <el-dialog v-model="ruleDialogVisible" :title="editingRule ? '编辑规则' : '添加规则'" width="500px">
       <el-form :model="ruleForm" :rules="ruleFormRules" ref="ruleFormRef" label-width="100px">
         <el-form-item label="规则类型" prop="ruleType">
-          <el-select v-model="ruleForm.ruleType" style="width: 100%">
+          <el-select v-model="ruleForm.ruleType" style="width: 100%" @change="handleRuleTypeChange">
             <el-option label="领取频率限制" value="frequency" />
             <el-option label="IP限制" value="ip" />
             <el-option label="设备限制" value="device" />
@@ -164,7 +201,11 @@
           <el-input-number v-model="ruleForm.config.limit" :min="1" />
           <span class="ml-2">次</span>
         </el-form-item>
-        <el-form-item v-if="['frequency', 'ip', 'device'].includes(ruleForm.ruleType)" label="时间窗口" prop="config.windowMinutes">
+        <el-form-item v-if="ruleForm.ruleType === 'behavior'" label="关联账号数" prop="config.distinctUserLimit">
+          <el-input-number v-model="ruleForm.config.distinctUserLimit" :min="2" />
+          <span class="ml-2">个不同账号</span>
+        </el-form-item>
+        <el-form-item v-if="['frequency', 'ip', 'device', 'behavior'].includes(ruleForm.ruleType)" label="时间窗口" prop="config.windowMinutes">
           <el-input-number v-model="ruleForm.config.windowMinutes" :min="1" />
           <span class="ml-2">分钟</span>
         </el-form-item>
@@ -235,7 +276,8 @@ import {
   getBlacklist,
   addToBlacklist,
   removeFromBlacklist,
-  getIntercepts
+  getIntercepts,
+  blacklistFromIntercept
 } from '@/api/riskApi'
 import dayjs from 'dayjs'
 
@@ -339,6 +381,14 @@ const blacklistTypeText = (type: string) => {
   return map[type] || type
 }
 
+const sceneText = (scene: string) => {
+  const map: Record<string, string> = {
+    receive: '用户领取',
+    redeem: '兑换码兑换'
+  }
+  return map[scene] || (scene || '-')
+}
+
 const formatDate = (date: string) => {
   return dayjs(date).format('YYYY-MM-DD HH:mm:ss')
 }
@@ -387,6 +437,70 @@ const loadIntercepts = async () => {
     interceptPagination.total = response.total
   } finally {
     loading.value = false
+  }
+}
+
+const handleInterceptSizeChange = () => {
+  interceptPagination.page = 1
+  loadIntercepts()
+}
+
+const handleTabChange = (tabName: string) => {
+  if (tabName === 'blacklist') {
+    blacklistPagination.page = 1
+    loadBlacklist()
+  } else if (tabName === 'intercepts') {
+    interceptPagination.page = 1
+    loadIntercepts()
+  }
+}
+
+const handleBlacklist = async (row: any, type: 'ip' | 'device' | 'user') => {
+  const typeText = blacklistTypeText(type)
+  const target = type === 'ip' ? row.ipAddress : type === 'device' ? row.deviceId : `用户${row.userId}`
+  try {
+    await ElMessageBox.confirm(
+      `确定将该条拦截记录对应的${typeText}「${target}」加入黑名单吗？加入后相关领取/兑换将被直接拦截。`,
+      '拉黑确认',
+      { confirmButtonText: '确认拉黑', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+
+  try {
+    const res = await blacklistFromIntercept(row.id, { type })
+    ElMessage.success(res.message || '已加入黑名单')
+  } catch (error) {
+    console.error('Blacklist from intercept failed:', error)
+  }
+}
+
+const handleAddRule = () => {
+  editingRule.value = null
+  Object.assign(ruleForm, {
+    id: null,
+    ruleType: 'frequency',
+    ruleName: '',
+    config: { limit: 5, windowMinutes: 60 },
+    action: 'block',
+    status: 'active',
+    description: ''
+  })
+  ruleDialogVisible.value = true
+}
+
+const handleRuleTypeChange = (type: string) => {
+  if (type === 'behavior') {
+    ruleForm.config = {
+      distinctUserLimit: ruleForm.config.distinctUserLimit || 5,
+      windowMinutes: ruleForm.config.windowMinutes || 60
+    }
+  } else {
+    ruleForm.config = {
+      limit: ruleForm.config.limit || 5,
+      windowMinutes: ruleForm.config.windowMinutes || 60
+    }
   }
 }
 
@@ -522,5 +636,16 @@ onMounted(() => {
 
 .mb-4 {
   margin-bottom: 16px;
+}
+
+.details-text {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  color: #909399;
+  font-size: 12px;
 }
 </style>

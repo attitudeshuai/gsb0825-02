@@ -75,7 +75,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Tickets, DataLine, Key, Download, Check, Warning, TrendCharts, User } from '@element-plus/icons-vue'
+import { Tickets, DataLine, Key, Promotion, Download, Check, Warning, TrendCharts, User } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/authStore'
 import { changePassword } from '@/api/authApi'
 
@@ -114,6 +114,7 @@ const menuItems = [
   { path: '/batches', title: '券批次管理', icon: Tickets, roles: ['admin', 'operator'] },
   { path: '/batches/create', title: '创建券批次', icon: Tickets, roles: ['admin', 'operator'] },
   { path: '/codes', title: '券码管理', icon: Key, roles: ['admin', 'operator'] },
+  { path: '/issue', title: '券发放', icon: Promotion, roles: ['admin', 'operator'] },
   { path: '/records/receive', title: '领取记录', icon: Download },
   { path: '/records/use', title: '核销记录', icon: Check },
   { path: '/risk', title: '风控配置', icon: Warning, roles: ['admin'] },

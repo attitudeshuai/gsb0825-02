@@ -54,6 +54,13 @@ async function init() {
         config: { limit: 5, windowMinutes: 60 },
         action: 'block',
         description: '限制同一设备每小时最多领取5张优惠券'
+      },
+      {
+        ruleType: 'behavior',
+        ruleName: '多账号关联领取检测',
+        config: { distinctUserLimit: 5, windowMinutes: 60 },
+        action: 'block',
+        description: '同一IP/设备60分钟内出现5个及以上不同账号领取时拦截'
       }
     ]);
     console.log('默认风控规则创建成功');

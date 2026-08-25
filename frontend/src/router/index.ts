@@ -48,6 +48,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '券码管理', icon: 'Key', roles: ['admin', 'operator'] }
       },
       {
+        path: 'issue',
+        name: 'IssueCoupon',
+        component: () => import('@/views/IssueCoupon.vue'),
+        meta: { title: '券发放', icon: 'Promotion', roles: ['admin', 'operator'] }
+      },
+      {
         path: 'records/receive',
         name: 'ReceiveRecordList',
         component: () => import('@/views/RecordList.vue'),
