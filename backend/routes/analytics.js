@@ -3,6 +3,33 @@ const { sequelize, CouponBatch, UseRecord, ReceiveRecord } = require('../models'
 const { QueryTypes } = require('sequelize');
 const dayjs = require('dayjs');
 
+// 用户分层统一口径：按累计实付金额划分（与 /api/analytics/user-segment 一致）
+const USER_SEGMENTS = {
+  highValue: { name: '高价值用户', condition: 'total_pay >= 10000', test: (p) => p >= 10000 },
+  active: { name: '活跃用户', condition: 'total_pay >= 1000 AND total_pay < 10000', test: (p) => p >= 1000 && p < 10000 },
+  normal: { name: '普通用户', condition: 'total_pay > 0 AND total_pay < 1000', test: (p) => p > 0 && p < 1000 },
+  inactive: { name: '沉睡用户', condition: 'total_pay <= 0', test: (p) => p <= 0 }
+};
+
+async function querySegmentUserIds(segment, limit = 1000) {
+  const seg = USER_SEGMENTS[segment];
+  if (!seg) {
+    throw new Error('无效的人群分层');
+  }
+  const rows = await sequelize.query(`
+    SELECT user_id FROM (
+      SELECT cc.user_id, COALESCE(SUM(ur.actual_pay_amount), 0) AS total_pay
+      FROM coupon_codes cc
+      LEFT JOIN use_records ur ON cc.id = ur.coupon_id
+      WHERE cc.user_id IS NOT NULL
+      GROUP BY cc.user_id
+    ) t
+    WHERE ${seg.condition}
+    LIMIT ?
+  `, { replacements: [limit], type: QueryTypes.SELECT });
+  return rows.map(r => r.user_id);
+}
+
 async function routes(fastify, options) {
   fastify.get('/api/analytics/overview', { preHandler: [authMiddleware] }, async (request, reply) => {
     const result = await sequelize.query(`
@@ -221,15 +248,8 @@ async function routes(fastify, options) {
 
     result.forEach(user => {
       const totalPay = parseFloat(user.total_pay || 0);
-      if (totalPay >= 10000) {
-        segments.highValue.push(user);
-      } else if (totalPay >= 1000) {
-        segments.active.push(user);
-      } else if (totalPay > 0) {
-        segments.normal.push(user);
-      } else {
-        segments.inactive.push(user);
-      }
+      const key = Object.keys(USER_SEGMENTS).find(k => USER_SEGMENTS[k].test(totalPay));
+      segments[key].push(user);
     });
 
     return {
@@ -245,3 +265,4 @@ async function routes(fastify, options) {
 }
 
 module.exports = routes;
+module.exports.querySegmentUserIds = querySegmentUserIds;
