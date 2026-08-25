@@ -1,5 +1,6 @@
 const { authMiddleware, roleMiddleware } = require('../middleware/auth');
 const { CouponCode, CouponBatch, ReceiveRecord, sequelize } = require('../models');
+const { checkRisk } = require('./risk');
 const { Op, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
 
@@ -30,9 +31,17 @@ async function routes(fastify, options) {
   });
 
   fastify.post('/api/codes/:id/receive', { preHandler: [authMiddleware] }, async (request, reply) => {
+    const { userId, deviceId } = request.body;
+
+    // 风控检查放在事务外：避免事务持有连接期间再占用连接导致连接池耗尽，
+    // 且拦截记录独立于业务事务提交，业务回滚不会丢失拦截记录
+    const riskResult = await checkRisk(request, userId, deviceId, request.ip);
+    if (riskResult.blocked) {
+      return reply.status(403).send({ message: riskResult.reason || '操作已被风控拦截' });
+    }
+
     const t = await sequelize.transaction();
     try {
-      const { userId, deviceId } = request.body;
       const coupon = await CouponCode.findByPk(request.params.id, {
         lock: true,
         transaction: t
@@ -48,7 +57,7 @@ async function routes(fastify, options) {
         return reply.status(400).send({ message: '券码不可用' });
       }
 
-      const batch = await CouponBatch.findByPk(coupon.batchId, { transaction: t });
+      const batch = await CouponBatch.findByPk(coupon.batchId, { lock: true, transaction: t });
       if (batch.status !== 'active') {
         await t.rollback();
         return reply.status(400).send({ message: '批次未激活' });
@@ -86,7 +95,7 @@ async function routes(fastify, options) {
         batchId: batch.id,
         couponId: coupon.id,
         userId,
-        channel: batch.deliveryStrategy,
+        channel: 'receive',
         deviceId,
         ipAddress: request.ip,
         userAgent: request.headers['user-agent']
@@ -102,6 +111,12 @@ async function routes(fastify, options) {
 
   fastify.post('/api/codes/redeem', { preHandler: [authMiddleware] }, async (request, reply) => {
     const { code, userId, deviceId } = request.body;
+
+    // 风控检查放在事务外，原因同上
+    const riskResult = await checkRisk(request, userId, deviceId, request.ip);
+    if (riskResult.blocked) {
+      return reply.status(403).send({ message: riskResult.reason || '操作已被风控拦截' });
+    }
 
     const t = await sequelize.transaction();
     try {
@@ -121,10 +136,20 @@ async function routes(fastify, options) {
         return reply.status(400).send({ message: '兑换码已被使用或已过期' });
       }
 
-      const batch = await CouponBatch.findByPk(coupon.batchId, { transaction: t });
+      const batch = await CouponBatch.findByPk(coupon.batchId, { lock: true, transaction: t });
       if (batch.status !== 'active') {
         await t.rollback();
         return reply.status(400).send({ message: '活动已结束' });
+      }
+
+      const userRedeemedCount = await CouponCode.count({
+        where: { batchId: batch.id, userId, status: { [Op.ne]: 'cancelled' } },
+        transaction: t
+      });
+
+      if (userRedeemedCount >= batch.limitPerPerson) {
+        await t.rollback();
+        return reply.status(400).send({ message: '已达到领取上限' });
       }
 
       coupon.userId = userId;

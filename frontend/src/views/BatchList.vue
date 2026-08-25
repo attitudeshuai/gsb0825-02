@@ -78,6 +78,7 @@
         <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="viewDetail(row)">详情</el-button>
+            <el-button v-if="row.status === 'active'" link type="primary" @click="openDeliverDialog(row)">发放</el-button>
             <el-button v-if="row.status === 'pending'" link type="primary" @click="editBatch(row)">编辑</el-button>
             <el-button v-if="row.status === 'pending'" link type="success" @click="handleActivate(row)">激活</el-button>
             <el-button v-if="row.status === 'active'" link type="warning" @click="handleStop(row)">停止</el-button>
@@ -98,16 +99,61 @@
         />
       </div>
     </div>
+    
+    <el-dialog v-model="deliverDialogVisible" title="发放优惠券" width="560px">
+      <div v-if="deliverBatch" class="deliver-batch-info">
+        <span>{{ deliverBatch.name }}（{{ deliverBatch.batchCode }}）</span>
+        <span class="text-sm">剩余库存 {{ deliverBatch.totalQuantity - deliverBatch.receivedQuantity }}</span>
+      </div>
+      <el-tabs v-model="deliverMode">
+        <el-tab-pane label="指定用户发放" name="manual">
+          <el-input
+            v-model="deliverUserIdsText"
+            type="textarea"
+            :rows="6"
+            placeholder="输入用户ID，多个用逗号或换行分隔，例如：1001, 1002"
+          />
+        </el-tab-pane>
+        <el-tab-pane label="定向人群发放" name="targeted">
+          <el-form :inline="true">
+            <el-form-item label="人群分层">
+              <el-select v-model="deliverSegment.type" style="width: 260px">
+                <el-option label="高价值用户（累计实付 ≥ 10000）" value="highValue" />
+                <el-option label="活跃用户（累计实付 1000 ~ 10000）" value="active" />
+                <el-option label="普通用户（累计实付 0 ~ 1000）" value="normal" />
+                <el-option label="沉睡用户（无实付）" value="inactive" />
+              </el-select>
+            </el-form-item>
+          </el-form>
+        </el-tab-pane>
+      </el-tabs>
+      <div v-if="deliverResult" class="deliver-result">
+        <el-alert
+          :type="deliverResult.failCount > 0 ? 'warning' : 'success'"
+          :closable="false"
+          :title="`共 ${deliverResult.total} 人，成功 ${deliverResult.successCount} 人，失败 ${deliverResult.failCount} 人`"
+        />
+        <div v-if="failedResults.length" class="failed-list">
+          <div v-for="item in failedResults" :key="item.userId" class="text-sm">
+            用户 {{ item.userId }}：{{ item.reason }}
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="deliverDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="delivering" @click="handleDeliver">确认发放</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { useCouponStore } from '@/stores/couponStore'
-import { activateBatch, stopBatch, cancelBatch } from '@/api/couponApi'
+import { activateBatch, stopBatch, cancelBatch, deliverCoupon, DeliverResponse } from '@/api/couponApi'
 import dayjs from 'dayjs'
 
 const router = useRouter()
@@ -190,6 +236,62 @@ const viewDetail = (row: any) => {
   ElMessage.info('查看详情功能开发中')
 }
 
+const deliverDialogVisible = ref(false)
+const deliverBatch = ref<any>(null)
+const deliverMode = ref('manual')
+const deliverUserIdsText = ref('')
+const deliverSegment = reactive({ type: 'highValue' })
+const delivering = ref(false)
+const deliverResult = ref<DeliverResponse | null>(null)
+
+const failedResults = computed(() => {
+  return deliverResult.value?.results.filter(r => !r.success) || []
+})
+
+const openDeliverDialog = (row: any) => {
+  deliverBatch.value = row
+  deliverMode.value = 'manual'
+  deliverUserIdsText.value = ''
+  deliverSegment.type = 'highValue'
+  deliverResult.value = null
+  deliverDialogVisible.value = true
+}
+
+const handleDeliver = async () => {
+  if (!deliverBatch.value) return
+
+  const payload: { userIds?: number[]; segment?: { type: string } } = {}
+  if (deliverMode.value === 'manual') {
+    const userIds = deliverUserIdsText.value
+      .split(/[\s,，、;；]+/)
+      .map(s => parseInt(s))
+      .filter(n => Number.isInteger(n) && n > 0)
+    if (userIds.length === 0) {
+      ElMessage.warning('请输入至少一个有效的用户ID')
+      return
+    }
+    payload.userIds = userIds
+  } else {
+    payload.segment = { type: deliverSegment.type }
+  }
+
+  delivering.value = true
+  try {
+    const res: any = await deliverCoupon(deliverBatch.value.id, payload)
+    deliverResult.value = res as DeliverResponse
+    if (res.failCount === 0) {
+      ElMessage.success(`发放成功，共 ${res.successCount} 人`)
+    } else {
+      ElMessage.warning(`部分发放失败：成功 ${res.successCount} 人，失败 ${res.failCount} 人`)
+    }
+    loadBatches()
+  } catch (error) {
+    console.error('Deliver failed:', error)
+  } finally {
+    delivering.value = false
+  }
+}
+
 const editBatch = (row: any) => {
   router.push(`/batches/${row.id}/edit`)
 }
@@ -260,5 +362,22 @@ onMounted(() => {
 .text-sm {
   font-size: 12px;
   color: #909399;
+}
+
+.deliver-batch-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.deliver-result {
+  margin-top: 16px;
+}
+
+.failed-list {
+  margin-top: 8px;
+  max-height: 160px;
+  overflow-y: auto;
 }
 </style>

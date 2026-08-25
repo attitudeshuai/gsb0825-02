@@ -102,6 +102,8 @@ const CouponBatch = sequelize.define('CouponBatch', {
   deliveryStrategy: {
     type: DataTypes.ENUM('manual', 'receive', 'redeem', 'targeted', 'new_user'),
     defaultValue: 'receive',
+    // new_user（新人自动发放）未实现：本系统没有 C 端用户表和注册事件，
+    // 券用户都是外部 ID，无法感知"新用户"时机，需要业务方接入注册事件后才能落地
     comment: '投放策略'
   },
   status: {

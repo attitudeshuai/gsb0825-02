@@ -10,7 +10,7 @@
       </div>
     </div>
     
-    <el-tabs v-model="activeTab">
+    <el-tabs v-model="activeTab" @tab-change="handleTabChange">
       <el-tab-pane label="风控规则" name="rules">
         <div v-loading="loading" class="table-container">
           <el-table :data="rules" border stripe>
@@ -129,6 +129,13 @@
                 <el-tooltip :content="JSON.stringify(row.details)" placement="top">
                   <span>{{ JSON.stringify(row.details) }}</span>
                 </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="200" fixed="right">
+              <template #default="{ row }">
+                <el-button v-if="row.ipAddress" link type="danger" @click="handleBlacklistFromIntercept(row, 'ip')">拉黑IP</el-button>
+                <el-button v-if="row.deviceId" link type="danger" @click="handleBlacklistFromIntercept(row, 'device')">拉黑设备</el-button>
+                <el-button v-if="row.userId" link type="danger" @click="handleBlacklistFromIntercept(row, 'user')">拉黑用户</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -341,6 +348,45 @@ const blacklistTypeText = (type: string) => {
 
 const formatDate = (date: string) => {
   return dayjs(date).format('YYYY-MM-DD HH:mm:ss')
+}
+
+const handleTabChange = (name: string | number) => {
+  if (name === 'blacklist') {
+    loadBlacklist()
+  } else if (name === 'intercepts') {
+    loadIntercepts()
+  } else if (name === 'rules') {
+    loadRules()
+  }
+}
+
+const handleBlacklistFromIntercept = async (row: any, type: 'ip' | 'device' | 'user') => {
+  const valueMap: Record<string, string> = {
+    ip: row.ipAddress,
+    device: row.deviceId,
+    user: String(row.userId)
+  }
+  const labelMap: Record<string, string> = { ip: 'IP', device: '设备', user: '用户' }
+  const value = valueMap[type]
+
+  try {
+    await ElMessageBox.confirm(`确定将${labelMap[type]}「${value}」加入黑名单吗？`, '提示', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    await addToBlacklist({
+      type,
+      value,
+      reason: `拦截记录 #${row.id}（${row.ruleName || '手动拉黑'}）`,
+      isPermanent: true
+    })
+    ElMessage.success('已加入黑名单')
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      console.error('Add blacklist from intercept failed:', error)
+    }
+  }
 }
 
 const loadRules = async () => {

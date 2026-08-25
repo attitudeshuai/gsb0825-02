@@ -88,6 +88,28 @@ export const cancelBatch = (id: number) => {
   })
 }
 
+export interface DeliverResultItem {
+  userId: number
+  success: boolean
+  reason?: string
+  code?: string
+}
+
+export interface DeliverResponse {
+  total: number
+  successCount: number
+  failCount: number
+  results: DeliverResultItem[]
+}
+
+export const deliverCoupon = (batchId: number, data: { userIds?: number[]; segment?: { type: string } }) => {
+  return request<DeliverResponse>({
+    url: `/batches/${batchId}/deliver`,
+    method: 'post',
+    data
+  })
+}
+
 export const getBatchStatistics = () => {
   return request({
     url: '/batches/statistics/summary',
