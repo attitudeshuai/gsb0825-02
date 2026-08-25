@@ -101,3 +101,15 @@ export const checkRisk = (data: { userId?: number; deviceId?: string; ipAddress?
     data
   })
 }
+
+// 从拦截记录一键加入黑名单
+export const blacklistFromIntercept = (
+  id: number,
+  data: { type: string; reason?: string; expireAt?: string; isPermanent?: boolean }
+) => {
+  return request<RiskBlacklistItem>({
+    url: `/risk/intercepts/${id}/blacklist`,
+    method: 'post',
+    data
+  })
+}

@@ -170,3 +170,30 @@ export const getUserCoupons = (data: { userId: number; status?: string; batchId?
     data
   })
 }
+
+export interface IssueResult {
+  message: string
+  successCount: number
+  failCount: number
+  results: { userId: number; success: boolean; message?: string; code?: string }[]
+  targetCount?: number
+  segment?: string
+}
+
+// 手动发放：给一个或一批指定用户发券
+export const issueCoupons = (data: { batchId: number; userIds: number[] }) => {
+  return request<IssueResult>({
+    url: '/codes/issue',
+    method: 'post',
+    data
+  })
+}
+
+// 定向发放：按用户分层发券
+export const issueTargetedCoupons = (data: { batchId: number; segment: string }) => {
+  return request<IssueResult>({
+    url: '/codes/issue-targeted',
+    method: 'post',
+    data
+  })
+}

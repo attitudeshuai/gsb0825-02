@@ -95,13 +95,26 @@ async function routes(fastify, options) {
   });
 
   fastify.post('/api/codes/:id/use', { preHandler: [authMiddleware] }, async (request, reply) => {
+    const { orderId, orderAmount, userId, productInfo } = request.body;
+    const now = new Date();
+
+    // 先读一次券码拿到 batchId（不加锁），以便统一按“先锁批次、再锁券码”的顺序加锁
+    const couponMeta = await CouponCode.findByPk(request.params.id, { attributes: ['id', 'batchId'] });
+    if (!couponMeta) {
+      return reply.status(404).send({ message: '优惠券不存在' });
+    }
+
     const t = await sequelize.transaction();
     try {
-      const { orderId, orderAmount, userId, productInfo } = request.body;
-      const now = new Date();
+      // 统一加锁顺序：批次行锁 -> 券码行锁
+      const batch = await CouponBatch.findByPk(couponMeta.batchId, { lock: t.LOCK.UPDATE, transaction: t });
+      if (!batch) {
+        await t.rollback();
+        return reply.status(404).send({ message: '批次不存在' });
+      }
 
       const coupon = await CouponCode.findByPk(request.params.id, {
-        lock: true,
+        lock: t.LOCK.UPDATE,
         transaction: t
       });
 
@@ -130,7 +143,6 @@ async function routes(fastify, options) {
         return reply.status(400).send({ message: '优惠券未到使用时间' });
       }
 
-      const batch = await CouponBatch.findByPk(coupon.batchId, { transaction: t });
       const discountAmount = calculateDiscount(batch, orderAmount);
 
       if (discountAmount <= 0) {
@@ -169,13 +181,23 @@ async function routes(fastify, options) {
   });
 
   fastify.post('/api/records/use/:id/refund', { preHandler: [authMiddleware, roleMiddleware(['admin', 'finance'])] }, async (request, reply) => {
+    const { refundOrderId } = request.body;
+
+    // 先读一次核销记录拿到 batchId/couponId（不加锁），以便统一按“先锁批次、再锁券码”的顺序加锁
+    const recordMeta = await UseRecord.findByPk(request.params.id, { attributes: ['id', 'batchId', 'couponId'] });
+    if (!recordMeta) {
+      return reply.status(404).send({ message: '核销记录不存在' });
+    }
+
     const t = await sequelize.transaction();
     try {
-      const { refundOrderId } = request.body;
-      const useRecord = await UseRecord.findByPk(request.params.id, {
-        include: [CouponCode, CouponBatch],
-        transaction: t
-      });
+      // 统一加锁顺序：批次行锁 -> 券码行锁
+      const batch = await CouponBatch.findByPk(recordMeta.batchId, { lock: t.LOCK.UPDATE, transaction: t });
+
+      const coupon = await CouponCode.findByPk(recordMeta.couponId, { lock: t.LOCK.UPDATE, transaction: t });
+
+      // 对核销记录行加锁后再校验 isRefunded，防止并发双退款把 usedQuantity 减两次
+      const useRecord = await UseRecord.findByPk(request.params.id, { lock: t.LOCK.UPDATE, transaction: t });
 
       if (!useRecord) {
         await t.rollback();
@@ -187,7 +209,6 @@ async function routes(fastify, options) {
         return reply.status(400).send({ message: '该订单已退款' });
       }
 
-      const coupon = useRecord.CouponCode;
       if (coupon) {
         coupon.status = 'received';
         coupon.usedAt = null;
@@ -195,8 +216,8 @@ async function routes(fastify, options) {
         await coupon.save({ transaction: t });
       }
 
-      if (useRecord.CouponBatch) {
-        await useRecord.CouponBatch.decrement('usedQuantity', { by: 1, transaction: t });
+      if (batch) {
+        await batch.decrement('usedQuantity', { by: 1, transaction: t });
       }
 
       useRecord.isRefunded = true;
@@ -214,35 +235,51 @@ async function routes(fastify, options) {
 
   fastify.post('/api/records/receive/batch-cancel', { preHandler: [authMiddleware, roleMiddleware(['admin', 'operator'])] }, async (request, reply) => {
     const { ids } = request.body;
+
+    // 先不加锁读一次记录元信息，拿到涉及的批次集合
+    const recordMetas = await ReceiveRecord.findAll({
+      where: { id: { [Op.in]: ids } },
+      attributes: ['id', 'couponId', 'batchId', 'isCancelled']
+    });
+
     const t = await sequelize.transaction();
-
     try {
-      const records = await ReceiveRecord.findAll({
-        where: { id: { [Op.in]: ids } },
-        include: [CouponCode, CouponBatch],
-        transaction: t
-      });
+      // 统一加锁顺序：批次行锁 -> 券码行锁。涉及多个批次时按 batchId 升序加锁，避免并发批量作废互相死锁
+      const batchIds = [...new Set(recordMetas.map(r => r.batchId).filter(id => id != null))].sort((a, b) => a - b);
+      const batchMap = {};
+      for (const batchId of batchIds) {
+        batchMap[batchId] = await CouponBatch.findByPk(batchId, { lock: t.LOCK.UPDATE, transaction: t });
+      }
 
-      for (const record of records) {
-        if (!record.isCancelled && record.CouponCode) {
-          record.isCancelled = true;
-          record.cancelledAt = new Date();
-          record.cancelledBy = request.user.id;
-          await record.save({ transaction: t });
+      let cancelledCount = 0;
+      for (const meta of recordMetas) {
+        if (meta.isCancelled || !meta.couponId) continue;
 
-          if (record.CouponCode.status === 'received') {
-            record.CouponCode.status = 'cancelled';
-            await record.CouponCode.save({ transaction: t });
+        const coupon = await CouponCode.findByPk(meta.couponId, { lock: t.LOCK.UPDATE, transaction: t });
+        const record = await ReceiveRecord.findByPk(meta.id, { lock: t.LOCK.UPDATE, transaction: t });
 
-            if (record.CouponBatch) {
-              await record.CouponBatch.decrement('receivedQuantity', { by: 1, transaction: t });
-            }
+        // 加锁后重新校验状态，避免并发下重复作废
+        if (!record || record.isCancelled || !coupon) continue;
+
+        record.isCancelled = true;
+        record.cancelledAt = new Date();
+        record.cancelledBy = request.user.id;
+        await record.save({ transaction: t });
+        cancelledCount++;
+
+        if (coupon.status === 'received') {
+          coupon.status = 'cancelled';
+          await coupon.save({ transaction: t });
+
+          const batch = batchMap[meta.batchId];
+          if (batch) {
+            await batch.decrement('receivedQuantity', { by: 1, transaction: t });
           }
         }
       }
 
       await t.commit();
-      return { message: `成功作废 ${records.length} 条记录` };
+      return { message: `成功作废 ${cancelledCount} 条记录` };
     } catch (error) {
       await t.rollback();
       return reply.status(400).send({ message: error.message });
