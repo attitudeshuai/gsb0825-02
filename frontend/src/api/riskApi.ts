@@ -101,3 +101,11 @@ export const checkRisk = (data: { userId?: number; deviceId?: string; ipAddress?
     data
   })
 }
+
+export const blacklistFromIntercept = (id: number, data: { type: string; reason?: string; expireAt?: string; isPermanent?: boolean }) => {
+  return request({
+    url: `/risk/intercepts/${id}/blacklist`,
+    method: 'post',
+    data
+  })
+}

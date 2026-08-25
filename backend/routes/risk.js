@@ -1,118 +1,7 @@
 const { authMiddleware, roleMiddleware } = require('../middleware/auth');
-const { RiskRule, RiskBlacklist, RiskIntercept, sequelize } = require('../models');
-const { Op, QueryTypes } = require('sequelize');
-
-async function checkRisk(request, userId, deviceId, ipAddress, batchId) {
-  const now = new Date();
-
-  const blacklist = await RiskBlacklist.findOne({
-    where: {
-      [Op.or]: [
-        { type: 'ip', value: ipAddress },
-        { type: 'device', value: deviceId },
-        { type: 'user', value: userId?.toString() }
-      ],
-      [Op.and]: [
-        { [Op.or]: [{ isPermanent: true }, { expireAt: { [Op.gt]: now } }] }
-      ]
-    }
-  });
-
-  if (blacklist) {
-    await RiskIntercept.create({
-      userId,
-      ipAddress,
-      deviceId,
-      ruleName: '黑名单拦截',
-      action: 'block',
-      details: { type: blacklist.type, value: blacklist.value, reason: blacklist.reason }
-    });
-    return { blocked: true, reason: '您已被列入黑名单' };
-  }
-
-  const activeRules = await RiskRule.findAll({ where: { status: 'active' } });
-
-  for (const rule of activeRules) {
-    const config = rule.config;
-    let isRisk = false;
-    let details = {};
-
-    switch (rule.ruleType) {
-      case 'frequency': {
-        const { limit, windowMinutes } = config;
-        const startTime = new Date(now - windowMinutes * 60 * 1000);
-        
-        const count = await sequelize.query(`
-          SELECT COUNT(*) as cnt FROM receive_records 
-          WHERE user_id = ? AND created_at > ?
-        `, {
-          replacements: [userId, startTime],
-          type: QueryTypes.SELECT
-        });
-
-        if (count[0].cnt >= limit) {
-          isRisk = true;
-          details = { count: count[0].cnt, limit, windowMinutes };
-        }
-        break;
-      }
-      case 'ip': {
-        const { limit, windowMinutes } = config;
-        const startTime = new Date(now - windowMinutes * 60 * 1000);
-        
-        const count = await sequelize.query(`
-          SELECT COUNT(*) as cnt FROM receive_records 
-          WHERE ip_address = ? AND created_at > ?
-        `, {
-          replacements: [ipAddress, startTime],
-          type: QueryTypes.SELECT
-        });
-
-        if (count[0].cnt >= limit) {
-          isRisk = true;
-          details = { count: count[0].cnt, limit, windowMinutes };
-        }
-        break;
-      }
-      case 'device': {
-        const { limit, windowMinutes } = config;
-        const startTime = new Date(now - windowMinutes * 60 * 1000);
-        
-        const count = await sequelize.query(`
-          SELECT COUNT(*) as cnt FROM receive_records 
-          WHERE device_id = ? AND created_at > ?
-        `, {
-          replacements: [deviceId, startTime],
-          type: QueryTypes.SELECT
-        });
-
-        if (count[0].cnt >= limit) {
-          isRisk = true;
-          details = { count: count[0].cnt, limit, windowMinutes };
-        }
-        break;
-      }
-    }
-
-    if (isRisk) {
-      await RiskIntercept.create({
-        userId,
-        ipAddress,
-        deviceId,
-        ruleId: rule.id,
-        ruleName: rule.ruleName,
-        action: rule.action,
-        details
-      });
-
-      if (rule.action === 'block') {
-        return { blocked: true, reason: rule.ruleName };
-      }
-    }
-  }
-
-  return { blocked: false };
-}
+const { RiskRule, RiskBlacklist, RiskIntercept } = require('../models');
+const { Op } = require('sequelize');
+const { checkRisk } = require('../services/riskService');
 
 async function routes(fastify, options) {
   fastify.get('/api/risk/rules', { preHandler: [authMiddleware, roleMiddleware(['admin'])] }, async (request, reply) => {
@@ -156,7 +45,7 @@ async function routes(fastify, options) {
   fastify.get('/api/risk/blacklist', { preHandler: [authMiddleware, roleMiddleware(['admin'])] }, async (request, reply) => {
     const { page = 1, pageSize = 10, type, keyword } = request.query;
     const offset = (page - 1) * pageSize;
-    
+
     const where = {};
     if (type) where.type = type;
     if (keyword) where.value = { [Op.like]: `%${keyword}%` };
@@ -177,7 +66,14 @@ async function routes(fastify, options) {
   });
 
   fastify.post('/api/risk/blacklist', { preHandler: [authMiddleware, roleMiddleware(['admin'])] }, async (request, reply) => {
-    const item = await RiskBlacklist.create(request.body);
+    const { type, value, reason, expireAt, isPermanent } = request.body;
+
+    const existing = await RiskBlacklist.findOne({ where: { type, value } });
+    if (existing) {
+      return reply.status(400).send({ message: '该记录已在黑名单中' });
+    }
+
+    const item = await RiskBlacklist.create({ type, value, reason, expireAt, isPermanent });
     return item;
   });
 
@@ -191,13 +87,15 @@ async function routes(fastify, options) {
   });
 
   fastify.get('/api/risk/intercepts', { preHandler: [authMiddleware, roleMiddleware(['admin'])] }, async (request, reply) => {
-    const { page = 1, pageSize = 10, startDate, endDate } = request.query;
+    const { page = 1, pageSize = 10, startDate, endDate, userId, ruleName } = request.query;
     const offset = (page - 1) * pageSize;
-    
+
     const where = {};
     if (startDate && endDate) {
       where.createdAt = { [Op.between]: [new Date(startDate), new Date(endDate)] };
     }
+    if (userId) where.userId = userId;
+    if (ruleName) where.ruleName = { [Op.like]: `%${ruleName}%` };
 
     const { count, rows } = await RiskIntercept.findAndCountAll({
       where,
@@ -214,9 +112,51 @@ async function routes(fastify, options) {
     };
   });
 
+  fastify.post('/api/risk/intercepts/:id/blacklist', { preHandler: [authMiddleware, roleMiddleware(['admin'])] }, async (request, reply) => {
+    const { type, reason, expireAt, isPermanent } = request.body;
+    const intercept = await RiskIntercept.findByPk(request.params.id);
+
+    if (!intercept) {
+      return reply.status(404).send({ message: '拦截记录不存在' });
+    }
+
+    const results = [];
+    const blacklistReasons = reason || `来自拦截记录 #${intercept.id}: ${intercept.ruleName}`;
+    const permanent = isPermanent !== undefined ? isPermanent : true;
+
+    const addIfNotExists = async (blType, blValue) => {
+      if (!blValue) return;
+      const existing = await RiskBlacklist.findOne({ where: { type: blType, value: blValue.toString() } });
+      if (existing) {
+        results.push({ type: blType, value: blValue, status: 'existed' });
+        return;
+      }
+      await RiskBlacklist.create({
+        type: blType,
+        value: blValue.toString(),
+        reason: blacklistReasons,
+        expireAt: permanent ? null : expireAt,
+        isPermanent: permanent
+      });
+      results.push({ type: blType, value: blValue, status: 'added' });
+    };
+
+    if (type === 'ip' || type === 'all') {
+      await addIfNotExists('ip', intercept.ipAddress);
+    }
+    if (type === 'device' || type === 'all') {
+      await addIfNotExists('device', intercept.deviceId);
+    }
+    if (type === 'user' || type === 'all') {
+      await addIfNotExists('user', intercept.userId);
+    }
+
+    return { message: '拉黑操作完成', results };
+  });
+
   fastify.post('/api/risk/check', { preHandler: [authMiddleware] }, async (request, reply) => {
     const { userId, deviceId, ipAddress, batchId } = request.body;
-    const result = await checkRisk(request, userId, deviceId, ipAddress, batchId);
+    const result = await checkRisk(userId, deviceId, ipAddress, batchId);
     return result;
   });
 

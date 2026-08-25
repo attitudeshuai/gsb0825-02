@@ -65,11 +65,20 @@
                 <el-option label="手动发放" value="manual" />
                 <el-option label="兑换码兑换" value="redeem" />
                 <el-option label="定向推送" value="targeted" />
-                <el-option label="新人自动发放" value="new_user" />
+                <el-option label="新人券（需外部触发）" value="new_user" />
               </el-select>
             </el-form-item>
           </el-col>
         </el-row>
+
+        <el-alert
+          v-if="form.deliveryStrategy === 'new_user'"
+          title="新人券策略说明：系统不包含用户注册模块，无法在用户注册时自动发券。创建后可由外部注册系统调用领取接口发放，或由运营通过「手动发放」功能发给指定用户。"
+          type="warning"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 18px"
+        />
         
         <el-row v-if="form.couponType === 'discount'" :gutter="20">
           <el-col :span="12">

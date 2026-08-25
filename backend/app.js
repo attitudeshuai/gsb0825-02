@@ -16,6 +16,7 @@ fastify.register(require('./routes/batch'));
 fastify.register(require('./routes/code'));
 fastify.register(require('./routes/record'));
 fastify.register(require('./routes/risk'));
+fastify.register(require('./routes/segment'));
 fastify.register(require('./routes/analytics'));
 fastify.register(require('./routes/export'));
 

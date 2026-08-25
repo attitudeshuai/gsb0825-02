@@ -66,6 +66,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '风控配置', icon: 'Warning', roles: ['admin'] }
       },
       {
+        path: 'segments',
+        name: 'SegmentList',
+        component: () => import('@/views/SegmentList.vue'),
+        meta: { title: '用户分层', icon: 'UserFilled', roles: ['admin', 'operator'] }
+      },
+      {
         path: 'analytics',
         name: 'Analytics',
         component: () => import('@/views/Analytics.vue'),
