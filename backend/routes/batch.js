@@ -1,18 +1,31 @@
 const { authMiddleware, roleMiddleware } = require('../middleware/auth');
-const { CouponBatch, CouponCode, User, sequelize } = require('../models');
+const { CouponBatch, CouponCode, User, UserSegment, sequelize } = require('../models');
 const { Op, QueryTypes } = require('sequelize');
 const dayjs = require('dayjs');
 const crypto = require('crypto');
+const { distributeToUsers } = require('../services/couponService');
+const { resolveSegmentUserIds } = require('../services/segmentService');
 
 function generateBatchCode() {
   return 'BATCH' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
+}
+
+function generateCouponCodes(batchId, count, prefix) {
+  const codes = [];
+  for (let i = 0; i < count; i++) {
+    const code = prefix
+      ? prefix + crypto.randomBytes(4).toString('hex').toUpperCase()
+      : crypto.randomBytes(8).toString('hex').toUpperCase();
+    codes.push({ batchId, code });
+  }
+  return codes;
 }
 
 async function routes(fastify, options) {
   fastify.get('/api/batches', { preHandler: [authMiddleware] }, async (request, reply) => {
     const { page = 1, pageSize = 10, status, couponType, keyword } = request.query;
     const offset = (page - 1) * pageSize;
-    
+
     const where = {};
     if (status) where.status = status;
     if (couponType) where.couponType = couponType;
@@ -59,19 +72,8 @@ async function routes(fastify, options) {
 
       const batch = await CouponBatch.create(data, { transaction: t });
 
-      if (data.deliveryStrategy === 'redeem') {
-        const codes = [];
-        for (let i = 0; i < data.totalQuantity; i++) {
-          const code = data.codePrefix
-            ? data.codePrefix + crypto.randomBytes(4).toString('hex').toUpperCase()
-            : crypto.randomBytes(8).toString('hex').toUpperCase();
-          codes.push({
-            batchId: batch.id,
-            code
-          });
-        }
-        await CouponCode.bulkCreate(codes, { transaction: t });
-      }
+      const codes = generateCouponCodes(batch.id, data.totalQuantity, data.codePrefix);
+      await CouponCode.bulkCreate(codes, { transaction: t });
 
       await t.commit();
       return batch;
@@ -126,7 +128,7 @@ async function routes(fastify, options) {
   fastify.post('/api/batches/:id/cancel', { preHandler: [authMiddleware, roleMiddleware(['admin'])] }, async (request, reply) => {
     const t = await sequelize.transaction();
     try {
-      const batch = await CouponBatch.findByPk(request.params.id, { transaction: t });
+      const batch = await CouponBatch.findByPk(request.params.id, { transaction: t, lock: true });
       if (!batch) {
         await t.rollback();
         return reply.status(404).send({ message: '批次不存在' });
@@ -148,9 +150,101 @@ async function routes(fastify, options) {
     }
   });
 
+  fastify.post('/api/batches/:id/distribute/manual', { preHandler: [authMiddleware, roleMiddleware(['admin', 'operator'])] }, async (request, reply) => {
+    const { userIds, userId } = request.body;
+    const batchId = request.params.id;
+
+    const batch = await CouponBatch.findByPk(batchId);
+    if (!batch) {
+      return reply.status(404).send({ message: '批次不存在' });
+    }
+
+    if (batch.status !== 'active') {
+      return reply.status(400).send({ message: '只能向进行中的批次发券' });
+    }
+
+    let targetUserIds = [];
+    if (userId) {
+      targetUserIds = [userId];
+    } else if (Array.isArray(userIds)) {
+      targetUserIds = userIds;
+    } else {
+      return reply.status(400).send({ message: '请指定发放用户' });
+    }
+
+    if (targetUserIds.length === 0) {
+      return reply.status(400).send({ message: '用户列表不能为空' });
+    }
+
+    const remaining = batch.totalQuantity - batch.receivedQuantity;
+    if (remaining <= 0) {
+      return reply.status(400).send({ message: '库存不足' });
+    }
+
+    const results = await distributeToUsers(
+      batchId,
+      targetUserIds,
+      'manual',
+      request.user.id,
+      { ipAddress: request.ip, userAgent: request.headers['user-agent'] }
+    );
+
+    return {
+      message: `发放完成：成功 ${results.success.length} 人，跳过 ${results.skipped.length} 人，失败 ${results.failed.length} 人`,
+      ...results
+    };
+  });
+
+  fastify.post('/api/batches/:id/distribute/targeted', { preHandler: [authMiddleware, roleMiddleware(['admin', 'operator'])] }, async (request, reply) => {
+    const { segmentId } = request.body;
+    const batchId = request.params.id;
+
+    const batch = await CouponBatch.findByPk(batchId);
+    if (!batch) {
+      return reply.status(404).send({ message: '批次不存在' });
+    }
+
+    if (batch.status !== 'active') {
+      return reply.status(400).send({ message: '只能向进行中的批次发券' });
+    }
+
+    if (!segmentId) {
+      return reply.status(400).send({ message: '请选择用户分层' });
+    }
+
+    const segment = await UserSegment.findByPk(segmentId);
+    if (!segment) {
+      return reply.status(404).send({ message: '用户分层不存在' });
+    }
+    if (segment.status !== 'active') {
+      return reply.status(400).send({ message: '用户分层已禁用' });
+    }
+
+    const targetUserIds = await resolveSegmentUserIds(segment);
+
+    if (targetUserIds.length === 0) {
+      return reply.status(400).send({ message: '该分层下暂无用户' });
+    }
+
+    const results = await distributeToUsers(
+      batchId,
+      targetUserIds,
+      'targeted',
+      request.user.id,
+      { ipAddress: request.ip, userAgent: request.headers['user-agent'] }
+    );
+
+    return {
+      message: `定向发放完成：分层「${segment.name}」共 ${targetUserIds.length} 人，成功 ${results.success.length} 人，跳过 ${results.skipped.length} 人，失败 ${results.failed.length} 人`,
+      segmentName: segment.name,
+      segmentTotal: targetUserIds.length,
+      ...results
+    };
+  });
+
   fastify.get('/api/batches/statistics/summary', { preHandler: [authMiddleware] }, async (request, reply) => {
     const today = dayjs().format('YYYY-MM-DD');
-    
+
     const result = await sequelize.query(`
       SELECT
         (SELECT COUNT(*) FROM coupon_batches) as total_batches,

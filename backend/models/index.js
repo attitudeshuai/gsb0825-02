@@ -4,6 +4,7 @@ const CouponBatch = require('./CouponBatch');
 const CouponCode = require('./CouponCode');
 const ReceiveRecord = require('./ReceiveRecord');
 const UseRecord = require('./UseRecord');
+const UserSegment = require('./UserSegment');
 const { RiskRule, RiskBlacklist, RiskIntercept } = require('./RiskRule');
 
 CouponBatch.hasMany(CouponCode, { foreignKey: 'batchId' });
@@ -24,6 +25,9 @@ UseRecord.belongsTo(CouponCode, { foreignKey: 'couponId' });
 User.hasMany(CouponBatch, { foreignKey: 'createdBy' });
 CouponBatch.belongsTo(User, { foreignKey: 'createdBy', as: 'creator' });
 
+User.hasMany(UserSegment, { foreignKey: 'createdBy' });
+UserSegment.belongsTo(User, { foreignKey: 'createdBy', as: 'creator' });
+
 module.exports = {
   sequelize,
   User,
@@ -31,6 +35,7 @@ module.exports = {
   CouponCode,
   ReceiveRecord,
   UseRecord,
+  UserSegment,
   RiskRule,
   RiskBlacklist,
   RiskIntercept

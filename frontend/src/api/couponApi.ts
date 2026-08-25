@@ -155,6 +155,30 @@ export const receiveCoupon = (id: number, data: { userId: number; deviceId?: str
   })
 }
 
+export const receiveBatchCoupon = (batchId: number, data: { userId: number; deviceId?: string }) => {
+  return request({
+    url: `/batches/${batchId}/receive`,
+    method: 'post',
+    data
+  })
+}
+
+export const manualDistribute = (batchId: number, data: { userId?: number; userIds?: number[] }) => {
+  return request({
+    url: `/batches/${batchId}/distribute/manual`,
+    method: 'post',
+    data
+  })
+}
+
+export const targetedDistribute = (batchId: number, data: { segmentId: number }) => {
+  return request({
+    url: `/batches/${batchId}/distribute/targeted`,
+    method: 'post',
+    data
+  })
+}
+
 export const useCoupon = (id: number, data: { orderId: string; orderAmount: number; userId: number; productInfo?: any }) => {
   return request({
     url: `/codes/${id}/use`,

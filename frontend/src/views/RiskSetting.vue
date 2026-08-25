@@ -10,7 +10,7 @@
       </div>
     </div>
     
-    <el-tabs v-model="activeTab">
+    <el-tabs v-model="activeTab" @tab-change="handleTabChange">
       <el-tab-pane label="风控规则" name="rules">
         <div v-loading="loading" class="table-container">
           <el-table :data="rules" border stripe>
@@ -115,20 +115,37 @@
       <el-tab-pane label="拦截记录" name="intercepts">
         <div v-loading="loading" class="table-container">
           <el-table :data="intercepts" border stripe>
-            <el-table-column prop="id" label="ID" width="80" />
-            <el-table-column prop="ruleName" label="触发规则" min-width="150" />
-            <el-table-column prop="action" label="处理动作" width="100" />
-            <el-table-column prop="userId" label="用户ID" width="100" />
+            <el-table-column prop="id" label="ID" width="70" />
+            <el-table-column prop="ruleName" label="触发规则" min-width="140" />
+            <el-table-column prop="action" label="处理动作" width="90" />
+            <el-table-column prop="userId" label="用户ID" width="90" />
             <el-table-column prop="ipAddress" label="IP地址" width="130" />
-            <el-table-column prop="deviceId" label="设备ID" width="150" />
-            <el-table-column prop="createdAt" label="时间" width="180">
+            <el-table-column prop="deviceId" label="设备ID" width="140" />
+            <el-table-column prop="createdAt" label="时间" width="160">
               <template #default="{ row }">{{ formatDate(row.createdAt) }}</template>
             </el-table-column>
-            <el-table-column label="详情" min-width="200">
+            <el-table-column label="详情" min-width="180">
               <template #default="{ row }">
                 <el-tooltip :content="JSON.stringify(row.details)" placement="top">
-                  <span>{{ JSON.stringify(row.details) }}</span>
+                  <span class="details-text">{{ JSON.stringify(row.details) }}</span>
                 </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="200" fixed="right">
+              <template #default="{ row }">
+                <el-dropdown trigger="click" @command="(cmd: string) => handleBlacklist(row, cmd)">
+                  <el-button type="primary" link>
+                    一键拉黑<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+                  </el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="ip" :disabled="!row.ipAddress">拉黑IP</el-dropdown-item>
+                      <el-dropdown-item command="device" :disabled="!row.deviceId">拉黑设备</el-dropdown-item>
+                      <el-dropdown-item command="user" :disabled="!row.userId">拉黑用户</el-dropdown-item>
+                      <el-dropdown-item command="all" divided>全部拉黑</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </template>
             </el-table-column>
           </el-table>
@@ -224,7 +241,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { Plus, ArrowDown } from '@element-plus/icons-vue'
 import {
   getRiskRules,
   createRiskRule,
@@ -235,7 +252,8 @@ import {
   getBlacklist,
   addToBlacklist,
   removeFromBlacklist,
-  getIntercepts
+  getIntercepts,
+  blacklistFromIntercept
 } from '@/api/riskApi'
 import dayjs from 'dayjs'
 
@@ -504,6 +522,53 @@ const handleSaveBlacklist = async () => {
   })
 }
 
+const handleBlacklist = async (row: any, type: string) => {
+  const typeText: Record<string, string> = {
+    ip: 'IP',
+    device: '设备',
+    user: '用户',
+    all: 'IP、设备和用户'
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定要将该记录的${typeText[type]}加入黑名单吗？`,
+      '拉黑确认',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+    const res: any = await blacklistFromIntercept(row.id, { type, isPermanent: true })
+    const added = res.results?.filter((r: any) => r.status === 'added').length || 0
+    const existed = res.results?.filter((r: any) => r.status === 'existed').length || 0
+    if (added > 0 && existed > 0) {
+      ElMessage.success(`已添加 ${added} 项，${existed} 项已在黑名单中`)
+    } else if (added > 0) {
+      ElMessage.success(`成功拉黑 ${added} 项`)
+    } else {
+      ElMessage.info('所选项目均已在黑名单中')
+    }
+    loadBlacklist()
+    loadIntercepts()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      console.error('Blacklist failed:', error)
+      ElMessage.error(error?.message || '拉黑失败')
+    }
+  }
+}
+
+const handleTabChange = (tabName: string) => {
+  if (tabName === 'blacklist') {
+    blacklistPagination.page = 1
+    loadBlacklist()
+  } else if (tabName === 'intercepts') {
+    interceptPagination.page = 1
+    loadIntercepts()
+  }
+}
+
 onMounted(() => {
   loadRules()
 })
@@ -522,5 +587,15 @@ onMounted(() => {
 
 .mb-4 {
   margin-bottom: 16px;
+}
+
+.details-text {
+  font-size: 12px;
+  color: #909399;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>
