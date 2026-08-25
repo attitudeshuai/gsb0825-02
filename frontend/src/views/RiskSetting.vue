@@ -131,6 +131,11 @@
                 </el-tooltip>
               </template>
             </el-table-column>
+            <el-table-column label="操作" width="120" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="danger" @click="openBlacklistFromIntercept(row)">加入黑名单</el-button>
+              </template>
+            </el-table-column>
           </el-table>
           
           <div class="pagination-container">
@@ -218,11 +223,48 @@
         <el-button type="primary" :loading="saving" @click="handleSaveBlacklist">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="interceptBlacklistVisible" title="加入黑名单" width="420px">
+      <el-form label-width="90px">
+        <el-form-item label="拉黑维度">
+          <el-radio-group v-model="interceptBlacklistForm.type">
+            <el-radio value="ip" :disabled="!currentIntercept?.ipAddress">
+              IP{{ currentIntercept?.ipAddress ? `（${currentIntercept.ipAddress}）` : '（无）' }}
+            </el-radio>
+            <el-radio value="device" :disabled="!currentIntercept?.deviceId">
+              设备{{ currentIntercept?.deviceId ? `（${currentIntercept.deviceId}）` : '（无）' }}
+            </el-radio>
+            <el-radio value="user" :disabled="currentIntercept?.userId == null">
+              用户{{ currentIntercept?.userId != null ? `（${currentIntercept.userId}）` : '（无）' }}
+            </el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="是否永久">
+          <el-switch v-model="interceptBlacklistForm.isPermanent" />
+        </el-form-item>
+        <el-form-item v-if="!interceptBlacklistForm.isPermanent" label="过期时间">
+          <el-date-picker
+            v-model="interceptBlacklistForm.expireAt"
+            type="datetime"
+            placeholder="选择过期时间"
+            value-format="YYYY-MM-DD HH:mm:ss"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="原因">
+          <el-input v-model="interceptBlacklistForm.reason" type="textarea" :rows="2" placeholder="可选，默认记录来源拦截" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="interceptBlacklistVisible = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="handleConfirmInterceptBlacklist">确认拉黑</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import {
@@ -235,7 +277,8 @@ import {
   getBlacklist,
   addToBlacklist,
   removeFromBlacklist,
-  getIntercepts
+  getIntercepts,
+  blacklistFromIntercept
 } from '@/api/riskApi'
 import dayjs from 'dayjs'
 
@@ -268,6 +311,15 @@ const interceptPagination = reactive({
   page: 1,
   pageSize: 10,
   total: 0
+})
+
+const interceptBlacklistVisible = ref(false)
+const currentIntercept = ref<any>(null)
+const interceptBlacklistForm = reactive({
+  type: '',
+  reason: '',
+  expireAt: '',
+  isPermanent: true
 })
 
 const ruleForm = reactive({
@@ -503,6 +555,52 @@ const handleSaveBlacklist = async () => {
     }
   })
 }
+
+const openBlacklistFromIntercept = (row: any) => {
+  currentIntercept.value = row
+  // 默认选中一个有值的维度：优先 IP，其次设备，再次用户
+  interceptBlacklistForm.type = row.ipAddress ? 'ip' : (row.deviceId ? 'device' : (row.userId != null ? 'user' : ''))
+  interceptBlacklistForm.reason = ''
+  interceptBlacklistForm.expireAt = ''
+  interceptBlacklistForm.isPermanent = true
+  interceptBlacklistVisible.value = true
+}
+
+const handleConfirmInterceptBlacklist = async () => {
+  if (!interceptBlacklistForm.type) {
+    ElMessage.warning('请选择拉黑维度')
+    return
+  }
+  if (!interceptBlacklistForm.isPermanent && !interceptBlacklistForm.expireAt) {
+    ElMessage.warning('请选择过期时间')
+    return
+  }
+
+  saving.value = true
+  try {
+    await blacklistFromIntercept(currentIntercept.value.id, {
+      type: interceptBlacklistForm.type,
+      reason: interceptBlacklistForm.reason,
+      expireAt: interceptBlacklistForm.isPermanent ? undefined : interceptBlacklistForm.expireAt,
+      isPermanent: interceptBlacklistForm.isPermanent
+    })
+    ElMessage.success('已加入黑名单')
+    interceptBlacklistVisible.value = false
+  } catch (error) {
+    console.error('Blacklist from intercept failed:', error)
+  } finally {
+    saving.value = false
+  }
+}
+
+// 切换标签页时按需加载对应数据
+watch(activeTab, (tab) => {
+  if (tab === 'blacklist') {
+    loadBlacklist()
+  } else if (tab === 'intercepts') {
+    loadIntercepts()
+  }
+})
 
 onMounted(() => {
   loadRules()

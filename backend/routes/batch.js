@@ -126,7 +126,7 @@ async function routes(fastify, options) {
   fastify.post('/api/batches/:id/cancel', { preHandler: [authMiddleware, roleMiddleware(['admin'])] }, async (request, reply) => {
     const t = await sequelize.transaction();
     try {
-      const batch = await CouponBatch.findByPk(request.params.id, { transaction: t });
+      const batch = await CouponBatch.findByPk(request.params.id, { lock: t.LOCK.UPDATE, transaction: t });
       if (!batch) {
         await t.rollback();
         return reply.status(404).send({ message: '批次不存在' });
